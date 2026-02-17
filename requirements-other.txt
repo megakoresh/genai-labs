@@ -1,0 +1,10 @@
+watermark
+tiktoken
+ipykernel
+black
+matplotlib
+tqdm
+tensorflow
+pandas
+huggingface_hub
+safetensors
