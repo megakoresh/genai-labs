@@ -17,8 +17,8 @@ from gpt_utils import (
 )
 import os
 
-VAL_LOSS_THRESHOLD = float(os.environ.get("VAL_LOSS_THRESHOLD", "0.64"))
-DIFF_THRESHOLD = float(os.environ.get("DIFF_THRESHOLD", "0.2"))
+VAL_LOSS_THRESHOLD = float(os.environ.get("VAL_LOSS_THRESHOLD", "0.09"))
+DIFF_THRESHOLD = float(os.environ.get("DIFF_THRESHOLD", "0.1"))
 
 
 class MultiHeadAttention(nn.Module):
@@ -581,7 +581,8 @@ def train_generator_advanced(
     eval_iter: int,
     start_context: str,
     tokenizer: tiktoken.Encoding,
-    initial_lr=3e-05,
+    initial_lr=0.0001,
+    min_lr=0.0001,
     gradient_clipping_max_norm=1.0,
 ):
     assert isinstance(start_context, str)
@@ -593,10 +594,10 @@ def train_generator_advanced(
     )  # training monitors
     print(f"Training on {device}")
     tokens_seen, global_step = 0, -1
-    min_lr = 0.1 * initial_lr
     total_steps = len(train_loader) * num_epochs
     warmup_steps = int(0.2 * total_steps)
     peak_lr = optimizer.param_groups[0]["lr"]
+    assert peak_lr > initial_lr, f"Peak lr from optimizer {peak_lr:f} was smaller than initial_lr {initial_lr:f}, which is not allowed"
     lr_increment = (peak_lr - initial_lr) / warmup_steps
     print("Warmup steps:", warmup_steps)
     print("LR increment:", lr_increment)
@@ -605,9 +606,10 @@ def train_generator_advanced(
         model.train()
         for i, (input_batch, target_batch) in enumerate(train_loader):
             optimizer.zero_grad()  # reset gradients from prev. epoch
+            global_step += 1
 
             # apply learning rate scaling (prevents sudden jumps in accuracy)
-            if global_step >= warmup_steps:
+            if global_step < warmup_steps:
                 lr = initial_lr + global_step * lr_increment
             else:
                 # apply cosine decay (reduces risk of overshooting loss minima)
@@ -624,14 +626,13 @@ def train_generator_advanced(
             loss.backward()  # update gradients via backpropagation
 
             # gradient clipping only applied after warmup (avoids exploding gradients, unsure why this is applied only after warmup)
-            if gradient_clipping_max_norm > 0 and global_step > warmup_steps:
+            if gradient_clipping_max_norm > 0 and global_step >= warmup_steps:
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(), max_norm=gradient_clipping_max_norm
                 )
 
             optimizer.step()  # update model weights based on gradients
             tokens_seen += input_batch.numel()
-            global_step += 1
 
             # check model performance every eval_freq steps
             if global_step % eval_freq == 0:
@@ -650,7 +651,7 @@ def train_generator_advanced(
                     print(
                         f"Training loss {train_loss} and validation loss {val_loss} are good enough, stopping training early"
                     )
-                    return train_losses, val_losses, track_tokens_seen
+                    return train_losses, val_losses, track_tokens_seen, track_lrs
 
         sample = generate(
             model,
@@ -662,7 +663,7 @@ def train_generator_advanced(
             50256,
         )  # 7
         print("Sample:", token_ids_to_text(sample, tokenizer))
-    return train_losses, val_losses, track_tokens_seen
+    return train_losses, val_losses, track_tokens_seen, track_lrs
 
 
 def format_input_alpaca(entry):
