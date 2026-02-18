@@ -1,9 +1,10 @@
+import math
 import torch
 from gpt_config import GPTConfig
 from torch import nn
 import numpy as np
-from typing import Any
-from torch.utils.data import DataLoader
+from typing import Any, Callable, Iterable
+from torch.utils.data import DataLoader, Dataset
 import tiktoken
 from gpt_utils import (
     calc_loss_batch_generator,
@@ -12,16 +13,20 @@ from gpt_utils import (
     evaluate_model_generator,
     generate,
     text_to_token_ids,
+    token_ids_to_text,
 )
+import os
 
-
-"""
-Calculate multiple heads of attention at the same time using matrix maths 
-instead of nested for loops
-"""
+VAL_LOSS_THRESHOLD = float(os.environ.get("VAL_LOSS_THRESHOLD", "0.64"))
+DIFF_THRESHOLD = float(os.environ.get("DIFF_THRESHOLD", "0.2"))
 
 
 class MultiHeadAttention(nn.Module):
+    """
+    Calculate multiple heads of attention at the same time using matrix maths
+    instead of nested for loops. Standard attention implementation from original paper.
+    """
+
     def __init__(
         self,
         d_in: int,
@@ -135,12 +140,11 @@ class GELU(nn.Module):
         )
 
 
-"""
-Standard processing layer in a NN that expands dimensionality and then contracts it using trainable linear layers
-"""
-
-
 class FeedForward(nn.Module):
+    """
+    Standard processing layer in a NN that expands dimensionality and then contracts it using trainable linear layers
+    """
+
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.layers = nn.Sequential(
@@ -153,15 +157,14 @@ class FeedForward(nn.Module):
         return self.layers(x)
 
 
-"""
-Transformer block is one layer of an LLM
-It consists of attention layer and a feed forward layer, with normalization in between (but not after - normalization between blocks is done at model level)
-It also applies dropout to prevent overdependence on individual outliers
-It implements shortcut connections by adding original input to the output, which helps to combat vanishing gradient issue (when loss in earlier layers quickly becomes zero)
-"""
-
-
 class TransformerBlock(nn.Module):
+    """
+    Transformer block is one layer of an LLM
+    It consists of attention layer and a feed forward layer, with normalization in between (but not after - normalization between blocks is done at model level)
+    It also applies dropout to prevent overdependence on individual outliers
+    It implements shortcut connections by adding original input to the output, which helps to combat vanishing gradient issue (when loss in earlier layers quickly becomes zero)
+    """
+
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.att = MultiHeadAttention(
@@ -193,12 +196,44 @@ class TransformerBlock(nn.Module):
         return x
 
 
-"""
-Basic model representing OpenAI GPT-2 model architecture
-"""
+class LoRALayer(nn.Module):
+    """
+    Rank determines number of trainable parameters. Bigger rank = better accuracy at cost of performance. Typical value to start with is 16
+    Alpha is a scalar that the result is multiplied with. Controls how big of an effect the LoRA layer has. Typically set to 1x or 2x the rank
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, rank: int, alpha: float) -> None:
+        super().__init__()
+        self.A = torch.nn.Parameter(torch.empty(in_dim, rank))
+        nn.init.kaiming_uniform_(
+            self.A, a=math.sqrt(5)
+        )  # this is apparently what pytorch initializes new layers by default with
+        self.B = torch.nn.Parameter(torch.zeros(rank, out_dim))
+        self.scaling = (
+            alpha / rank
+        )  # book uses alpha directly, it does not divide by rank, but in original paper the scaling is alpha over rank
+        # also author's own article uses this formula: https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms
+
+    def forward(self, x: torch.Tensor):
+        x = self.scaling * (x @ self.A @ self.B)
+        return x
+
+
+class LinearWithLoRA(nn.Module):
+    def __init__(self, linear: nn.Linear, rank: int, alpha: float) -> None:
+        super().__init__()
+        self.linear = linear
+        self.lora = LoRALayer(linear.in_features, linear.out_features, rank, alpha)
+
+    def forward(self, x: torch.Tensor):
+        return self.linear(x) + self.lora(x)
 
 
 class GPT2Model(nn.Module):
+    """
+    Basic model representing OpenAI GPT-2 model architecture
+    """
+
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.tok_emb = nn.Embedding(
@@ -233,6 +268,14 @@ class GPT2Model(nn.Module):
             x
         )  # logits are unscaled output (i.e. non-normalized) after expanding model output to vocabulary size
         return logits
+
+
+def replace_linear_with_lora(model: nn.Module, rank: int, alpha: float):
+    for name, module in model.named_children():
+        if isinstance(module, nn.Linear):
+            setattr(model, name, LinearWithLoRA(module, rank, alpha))
+        else:
+            replace_linear_with_lora(module, rank, alpha)
 
 
 def assign(
@@ -446,6 +489,11 @@ def train_classifier_simple(
     return train_losses, val_losses, train_accs, val_accs, examples_seen
 
 
+def good_enough(train_loss: float, val_loss: float):
+    diff = abs(train_loss - val_loss)
+    return diff < DIFF_THRESHOLD and val_loss < VAL_LOSS_THRESHOLD
+
+
 def train_generator_simple(
     model: GPT2Model,
     config: GPTConfig,
@@ -459,6 +507,7 @@ def train_generator_simple(
     start_context: str,
     tokenizer: tiktoken.Encoding,
 ):
+    assert isinstance(start_context, str)
     train_losses, val_losses, track_tokens_seen = [], [], []  # training monitors
     tokens_seen, global_step = 0, -1
     # according to book, most of the production models are trained a few times on huge corpi of data, rather than many times on small corpus like here. This is done to prevent overfitting
@@ -489,15 +538,209 @@ def train_generator_simple(
                     f"Train loss {train_loss:.3f}, "
                     f"Val loss {val_loss:.3f}"
                 )
+                if good_enough(train_loss, val_loss):
+                    print(
+                        f"Training loss {train_loss} and validation loss {val_loss} are good enough, stopping training early"
+                    )
+                    return train_losses, val_losses, track_tokens_seen
 
         sample = generate(
             model,
-            text_to_token_ids(start_context, tokenizer),
+            text_to_token_ids(start_context, tokenizer).to(device),
             50,
             config.context_length,
             1.5,
             15,
             50256,
         )  # 7
-        print("Sample:", sample)
+        print("Sample:", token_ids_to_text(sample, tokenizer))
     return train_losses, val_losses, track_tokens_seen
+
+
+def find_highest_gradient(model: nn.Module):
+    max_grad = None
+    for param in model.parameters():
+        if param.grad is not None:
+            grad_values = param.grad.data.flatten()
+            max_grad_param = grad_values.max()
+            if max_grad is None or max_grad_param > max_grad:
+                max_grad = max_grad_param
+    return max_grad
+
+
+# applies learning rate scheduler with linear scale + cosine decay after first 20% of learning steps. Also applies gradient clipping
+def train_generator_advanced(
+    model: GPT2Model,
+    config: GPTConfig,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    num_epochs: int,
+    eval_freq: int,
+    eval_iter: int,
+    start_context: str,
+    tokenizer: tiktoken.Encoding,
+    initial_lr=3e-05,
+    gradient_clipping_max_norm=1.0,
+):
+    assert isinstance(start_context, str)
+    train_losses, val_losses, track_tokens_seen, track_lrs = (
+        [],
+        [],
+        [],
+        [],
+    )  # training monitors
+    print(f"Training on {device}")
+    tokens_seen, global_step = 0, -1
+    min_lr = 0.1 * initial_lr
+    total_steps = len(train_loader) * num_epochs
+    warmup_steps = int(0.2 * total_steps)
+    peak_lr = optimizer.param_groups[0]["lr"]
+    lr_increment = (peak_lr - initial_lr) / warmup_steps
+    print("Warmup steps:", warmup_steps)
+    print("LR increment:", lr_increment)
+    # according to book, most of the production models are trained a few times on huge corpi of data, rather than many times on small corpus like here. This is done to prevent overfitting
+    for epoch in range(num_epochs):
+        model.train()
+        for i, (input_batch, target_batch) in enumerate(train_loader):
+            optimizer.zero_grad()  # reset gradients from prev. epoch
+
+            # apply learning rate scaling (prevents sudden jumps in accuracy)
+            if global_step >= warmup_steps:
+                lr = initial_lr + global_step * lr_increment
+            else:
+                # apply cosine decay (reduces risk of overshooting loss minima)
+                progress = (global_step - warmup_steps) / (total_steps - warmup_steps)
+                lr = min_lr + (peak_lr - min_lr) * 0.5 * (
+                    1 + math.cos(math.pi * progress)
+                )
+
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+            track_lrs.append(lr)
+
+            loss = calc_loss_batch_generator(input_batch, target_batch, model, device)
+            loss.backward()  # update gradients via backpropagation
+
+            # gradient clipping only applied after warmup (avoids exploding gradients, unsure why this is applied only after warmup)
+            if gradient_clipping_max_norm > 0 and global_step > warmup_steps:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=gradient_clipping_max_norm
+                )
+
+            optimizer.step()  # update model weights based on gradients
+            tokens_seen += input_batch.numel()
+            global_step += 1
+
+            # check model performance every eval_freq steps
+            if global_step % eval_freq == 0:
+                train_loss, val_loss = evaluate_model_generator(
+                    model, train_loader, val_loader, device, eval_iter
+                )
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                track_tokens_seen.append(tokens_seen)
+                print(
+                    f"Ep {epoch+1} (Step {global_step:06d}): "
+                    f"Train loss {train_loss:.3f}, "
+                    f"Val loss {val_loss:.3f}"
+                )
+                if good_enough(train_loss, val_loss):
+                    print(
+                        f"Training loss {train_loss} and validation loss {val_loss} are good enough, stopping training early"
+                    )
+                    return train_losses, val_losses, track_tokens_seen
+
+        sample = generate(
+            model,
+            text_to_token_ids(start_context, tokenizer).to(device),
+            50,
+            config.context_length,
+            1.5,
+            15,
+            50256,
+        )  # 7
+        print("Sample:", token_ids_to_text(sample, tokenizer))
+    return train_losses, val_losses, track_tokens_seen
+
+
+def format_input_alpaca(entry):
+    instruction_text = (
+        f"Below is an instruction that describes a task. "
+        f"Write a response that appropriately completes the request."
+        f"\n\n### Instruction:\n{entry['instruction']}"
+    )
+
+    input_text = f"\n\n### Input:\n{entry['input']}" if entry["input"] else ""
+    return instruction_text + input_text
+
+
+class InstructionDataset(Dataset):
+    def __init__(
+        self,
+        data: list[dict],
+        tokenizer: tiktoken.Encoding,
+        formatter: Callable[[dict], str],
+    ):
+        self.data = data
+        self.encoded_texts = []
+        for entry in data:  # 1
+            instruction_plus_input = formatter(entry)
+            response_text = f"\n\n### Response:\n{entry['output']}"
+            full_text = instruction_plus_input + response_text
+            self.encoded_texts.append(tokenizer.encode(full_text))
+
+    def __getitem__(self, index):
+        return self.encoded_texts[index]
+
+    def __len__(self):
+        return len(self.data)
+
+
+def custom_collate_fn(
+    batch: Iterable[list],
+    device: torch.device,
+    pad_token_id=50256,
+    ignore_index=-100,  # default behavior of pytorch cross_entry function is to ignore targets labelled with -100
+    allowed_max_length: int | None = None,
+    instruction_length: int = -1,
+):
+    batch_max_length = max(len(item) + 1 for item in batch)
+    inputs_lst, targets_lst = [], []
+
+    for item in batch:
+        new_item = item.copy()
+        if len(new_item) < batch_max_length:
+            padded = new_item + [pad_token_id] * (batch_max_length - len(new_item))
+        else:
+            padded = new_item
+        inputs = torch.tensor(padded[:-1])  # 2
+        targets = torch.tensor(padded[1:])  # 3
+
+        # replace all but the first pad token with ignore_index token
+        # this means the model is not penalized for generating anything beyond the first eot token
+        # in practice this means the model will not be trained to generate beyond the pad token, resulting chat-like behavior
+        # where generation will be stopped when the first pad token is encountered
+        mask = targets == pad_token_id  # 4
+        indices = torch.nonzero(mask).squeeze()  # 4
+        if indices.numel() > 1:  # 4
+            targets[indices[1:]] = (
+                ignore_index  # mask everything beyond the first pad token
+            )
+
+        # it is also common to mask out instruction part of the input so that model is not trained to memorize it
+        # the same mechanism can be used for that
+        if instruction_length > 0:
+            targets[padded[:instruction_length]] = ignore_index
+
+        if allowed_max_length is not None:
+            inputs = inputs[:allowed_max_length]  # 5
+            targets = targets[:allowed_max_length]  # 5
+
+        inputs_lst.append(inputs)
+        targets_lst.append(targets)
+
+    inputs_tensor = torch.stack(inputs_lst).to(device)
+    targets_tensor = torch.stack(targets_lst).to(device)
+    return inputs_tensor, targets_tensor

@@ -180,6 +180,7 @@ def generate(
     top_k: int | None = None,
     eos_id: int | None = None,
 ):
+    idx.to(next(model.parameters()).device)
     for _ in range(max_new_tokens):
         idx_cond = idx[:, -context_size:]
         with torch.no_grad():
@@ -207,9 +208,9 @@ def generate(
 
 def plot_losses(
     epochs_seen: torch.Tensor,
-    tokens_seen: List[float],
-    train_losses: List[float],
-    val_losses: List[float],
+    tokens_seen: List[float] | torch.Tensor,
+    train_losses: List[float] | torch.Tensor,
+    val_losses: List[float] | torch.Tensor,
 ):
     fig, ax1 = plt.subplots(figsize=(5, 3))
     ax1.plot(epochs_seen, train_losses, label="Training loss")
@@ -225,3 +226,4 @@ def plot_losses(
     ax2.set_xlabel("Tokens seen")
     fig.tight_layout()
     plt.show()
+    return plt

@@ -189,7 +189,9 @@ if __name__ == "__main__":
     dataset_path = download_file(args.url, args.dir)
     tokenizer = tiktoken.get_encoding("gpt2")
     config = OpenAIModelConfigs.gpt2_med_255m
-    file_name = f"{re.sub(r'[^a-zA-Z0-9]+', '_', config.hf_repo_id) }-instruct.pth"
+    file_name = (
+        f"data/models/{re.sub(r'[^a-zA-Z0-9]+', '_', config.hf_repo_id) }-instruct.pth"
+    )
     customized_collate_fn = partial(
         custom_collate_fn, device=config.device, allowed_max_length=1024
     )
@@ -347,7 +349,6 @@ if __name__ == "__main__":
         end_time = time.time()
         execution_time_minutes = (end_time - start_time) / 60
         print(f"Training completed in {execution_time_minutes:.2f} minutes.")
-        print(separator(f"Saving model to {file_name}"))
         torch.save(model.state_dict(), file_name)
         print(f"Model saved as {file_name}")
         epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
