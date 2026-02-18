@@ -29,3 +29,11 @@ pip install -r requirements-other.txt
 ```
 
 Create `data` folda
+
+## Running
+
+Most files can be run to invoke or test local functionality. All book chapter code should be runnable. Run as modules
+
+```
+python -m book_chapters_code.chapter7_finetuning_instruction --url https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch07/01_main-chapter-code/instruction-data.json
+```

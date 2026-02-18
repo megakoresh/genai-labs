@@ -9,14 +9,13 @@ from gpt_utils import (
     generate,
     token_ids_to_text,
     text_to_token_ids,
-    calc_loss_batch_generator,
 )
 import os
 from torch.utils.data import Dataset, DataLoader
 import tiktoken
-from typing import Callable, Iterable, Sized
+from typing import Callable, Iterable
 import torch
-from gpt_config import GPTConfig, OpenAIModelConfigs
+from gpt_config import OpenAIModelConfigs
 from functools import partial
 from gpt2_model import (
     GPT2Model,
