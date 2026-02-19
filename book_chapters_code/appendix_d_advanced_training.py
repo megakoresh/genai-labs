@@ -12,26 +12,29 @@ import tiktoken
 import torch
 from tqdm import tqdm
 
-from download_and_extract import download_file
-from gpt2_model import (
+from utils.downloads import download_file
+from models.gpt2 import (
     GPT2Model,
-    InstructionDataset,
-    custom_collate_fn,
-    format_input_alpaca,
     replace_linear_with_lora,
     train_generator_advanced,
 )
-from gpt_config import OpenAIModelConfigs
-from gpt_utils import (
+from models.gpt2 import OpenAIModelConfigs
+from utils.gpt_utils import (
     calc_loss_loader_generator,
     generate,
-    plot_losses,
     separator,
     text_to_token_ids,
     token_ids_to_text,
 )
 
 from torch.utils.data import DataLoader
+
+from utils.plot import plot_losses
+from utils.datasets import (
+    InstructionDataset,
+    custom_collate_fn,
+    format_input_alpaca,
+)
 
 
 @dataclass
@@ -172,13 +175,12 @@ if __name__ == "__main__":
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.1)
         num_epochs = 2
-        train_losses, val_losses, examples_seen = train_generator_advanced(
+        train_losses, val_losses, examples_seen, lr_seen = train_generator_advanced(
             model=model,
             config=config,
             train_loader=train_loader,
             val_loader=val_loader,
             optimizer=optimizer,
-            device=config.device,
             num_epochs=num_epochs,
             eval_freq=50,
             eval_iter=5,

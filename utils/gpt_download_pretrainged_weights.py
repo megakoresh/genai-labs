@@ -4,19 +4,17 @@ from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 from dataclasses import dataclass
 import argparse
-from torch import nn
-import torch
 import re
 
 
 @dataclass
-class CliArgs:
+class _CliArgs:
     repo_id: str
     base_dir: str
     tensors_file: str
 
 
-def parse_args():
+def _parse_args():
     parser = argparse.ArgumentParser(
         description="Download model safetensors file from huggingface"
     )
@@ -39,17 +37,17 @@ def parse_args():
         default="model.safetensors.index.json",
     )
     args = parser.parse_args()
-    return CliArgs(
+    return _CliArgs(
         repo_id=args.repo_id, base_dir=args.base_dir, tensors_file=args.tensors_file
     )
 
 
-def download_model_weights(repo_id: str, base_dir: str, tensors_file: str):
+def download_model_weights(repo_id: str, base_dir: str, tensors_file_or_index: str):
     base_dir = f"{base_dir}/{re.sub(r"[^a-zA-Z0-9]", "_", repo_id)}"
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
     repo_dir = snapshot_download(repo_id=repo_id, local_dir=base_dir)
-    index_path = os.path.join(repo_dir, tensors_file)
+    index_path = os.path.join(repo_dir, tensors_file_or_index)
     weights_dict = {}
     if os.path.exists(index_path) and index_path.endswith("index.json"):
         with open(index_path, "r") as index_f:
@@ -62,7 +60,7 @@ def download_model_weights(repo_id: str, base_dir: str, tensors_file: str):
             weights_dict.update(shard)
         return index_path, weights_dict
     else:
-        shard_path = os.path.join(repo_dir, tensors_file)
+        shard_path = os.path.join(repo_dir, tensors_file_or_index)
         print(f"No index file found, loading {shard_path} as a single shard")
         shard = load_file(shard_path)
         weights_dict.update(shard)
@@ -70,8 +68,12 @@ def download_model_weights(repo_id: str, base_dir: str, tensors_file: str):
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    args = _parse_args()
     safetensors_path, weights = download_model_weights(
         args.repo_id, args.base_dir, args.tensors_file
     )
-    print(weights.keys())
+    print(
+        f"Downloaded model keys from {args.repo_id} to {safetensors_path}. Available parameters:"
+    )
+    for key in weights.keys():
+        print(" ", key)

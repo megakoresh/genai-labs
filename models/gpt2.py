@@ -1,12 +1,12 @@
+from dataclasses import dataclass
 import math
 import torch
-from gpt_config import GPTConfig
 from torch import nn
 import numpy as np
-from typing import Any, Callable, Iterable
-from torch.utils.data import DataLoader, Dataset
+from typing import Any
+from torch.utils.data import DataLoader
 import tiktoken
-from gpt_utils import (
+from utils.gpt_utils import (
     calc_loss_batch_generator,
     calc_loss_batch_classifier,
     evaluate_model_classifier,
@@ -138,6 +138,26 @@ class GELU(nn.Module):
                 )
             )
         )
+
+
+@dataclass
+class GPTConfig:
+    context_length: int
+    vocab_size: int
+    emb_dim: int
+    n_attn_heads: int
+    n_layers: int
+    drop_rate: float
+    qkv_bias: bool
+    hf_repo_id: str
+
+    _device: torch.device | None = None
+
+    @property
+    def device(self):
+        if self._device == None:
+            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return self._device
 
 
 class FeedForward(nn.Module):
@@ -401,6 +421,7 @@ def assign_transformer_block_safetensors(
 
 
 def load_weights_into_gpt_from_safetensors_params(gpt: GPT2Model, params: dict):
+    orig_device = next(gpt.parameters()).device
     gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params["wpe.weight"])
     gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params["wte.weight"])
     for b in range(len(gpt.trf_blocks)):
@@ -411,12 +432,12 @@ def load_weights_into_gpt_from_safetensors_params(gpt: GPT2Model, params: dict):
     gpt.final_norm.scale = assign(gpt.final_norm.scale, params["ln_f.weight"])
     gpt.final_norm.shift = assign(gpt.final_norm.shift, params["ln_f.bias"])
     gpt.out_head.weight = assign(gpt.out_head.weight, params["wte.weight"])
+    gpt.to(orig_device)
 
 
 def classification_accuracy_loader(
     data_loader: DataLoader,
-    model: GPT2Model,
-    device: torch.device,
+    model: nn.Module,
     num_batches: int | None = None,
 ):
     model.eval()
@@ -428,9 +449,6 @@ def classification_accuracy_loader(
         num_batches = min(num_batches, len(data_loader))
     for i, (input_batch, target_batch) in enumerate(data_loader):
         if i < num_batches:
-            input_batch = input_batch.to(device)
-            target_batch = target_batch.to(device)
-
             with torch.no_grad():
                 logits = model(input_batch)[:, -1, :]  # 1
             predicted_labels = torch.argmax(logits, dim=-1)
@@ -444,7 +462,13 @@ def classification_accuracy_loader(
 
 
 def train_classifier_simple(
-    model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    optimizer,
+    num_epochs: int,
+    eval_freq: int,
+    eval_iter: int,
 ):
     train_losses, val_losses, train_accs, val_accs = [], [], [], []  # 1
     examples_seen, global_step = 0, -1
@@ -454,7 +478,7 @@ def train_classifier_simple(
 
         for input_batch, target_batch in train_loader:
             optimizer.zero_grad()  # 4
-            loss = calc_loss_batch_classifier(input_batch, target_batch, model, device)
+            loss = calc_loss_batch_classifier(input_batch, target_batch, model)
             loss.backward()  # 5
             optimizer.step()  # 6
             examples_seen += input_batch.shape[0]  # 7
@@ -463,7 +487,7 @@ def train_classifier_simple(
             # 8
             if global_step % eval_freq == 0:
                 train_loss, val_loss = evaluate_model_classifier(
-                    model, train_loader, val_loader, device, eval_iter
+                    model, train_loader, val_loader, eval_iter
                 )
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
@@ -475,10 +499,10 @@ def train_classifier_simple(
 
         # 9
         train_accuracy = classification_accuracy_loader(
-            train_loader, model, device, num_batches=eval_iter
+            train_loader, model, num_batches=eval_iter
         )
         val_accuracy = classification_accuracy_loader(
-            val_loader, model, device, num_batches=eval_iter
+            val_loader, model, num_batches=eval_iter
         )
 
         print(f"Training accuracy: {train_accuracy*100:.2f}% | ", end="")
@@ -500,7 +524,6 @@ def train_generator_simple(
     train_loader: DataLoader,
     val_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    device: torch.device,
     num_epochs: int,
     eval_freq: int,
     eval_iter: int,
@@ -508,6 +531,7 @@ def train_generator_simple(
     tokenizer: tiktoken.Encoding,
 ):
     assert isinstance(start_context, str)
+    device = next(model.parameters()).device
     train_losses, val_losses, track_tokens_seen = [], [], []  # training monitors
     tokens_seen, global_step = 0, -1
     # according to book, most of the production models are trained a few times on huge corpi of data, rather than many times on small corpus like here. This is done to prevent overfitting
@@ -515,7 +539,7 @@ def train_generator_simple(
         model.train()
         for i, (input_batch, target_batch) in enumerate(train_loader):
             optimizer.zero_grad()  # reset gradients from prev. epoch
-            loss = calc_loss_batch_generator(input_batch, target_batch, model, device)
+            loss = calc_loss_batch_generator(input_batch, target_batch, model)
             loss.backward()  # update gradients via backpropagation
             optimizer.step()  # update model weights based on gradients
             tokens_seen += input_batch.numel()
@@ -575,7 +599,6 @@ def train_generator_advanced(
     train_loader: DataLoader,
     val_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    device: torch.device,
     num_epochs: int,
     eval_freq: int,
     eval_iter: int,
@@ -591,6 +614,7 @@ def train_generator_advanced(
         [],
         [],
     )  # training monitors
+    device = next(model.parameters()).device
     print(f"Training on {device}")
     tokens_seen, global_step = 0, -1
     min_lr = 0.1 * initial_lr
@@ -620,7 +644,7 @@ def train_generator_advanced(
                 param_group["lr"] = lr
             track_lrs.append(lr)
 
-            loss = calc_loss_batch_generator(input_batch, target_batch, model, device)
+            loss = calc_loss_batch_generator(input_batch, target_batch, model)
             loss.backward()  # update gradients via backpropagation
 
             # gradient clipping only applied after warmup (avoids exploding gradients, unsure why this is applied only after warmup)
@@ -650,7 +674,7 @@ def train_generator_advanced(
                     print(
                         f"Training loss {train_loss} and validation loss {val_loss} are good enough, stopping training early"
                     )
-                    return train_losses, val_losses, track_tokens_seen
+                    return train_losses, val_losses, track_tokens_seen, track_lrs
 
         sample = generate(
             model,
@@ -662,85 +686,48 @@ def train_generator_advanced(
             50256,
         )  # 7
         print("Sample:", token_ids_to_text(sample, tokenizer))
-    return train_losses, val_losses, track_tokens_seen
+    return train_losses, val_losses, track_tokens_seen, track_lrs
 
 
-def format_input_alpaca(entry):
-    instruction_text = (
-        f"Below is an instruction that describes a task. "
-        f"Write a response that appropriately completes the request."
-        f"\n\n### Instruction:\n{entry['instruction']}"
+@dataclass
+class OpenAIModelConfigs:
+    gpt2_small_124m = GPTConfig(
+        emb_dim=768,
+        n_layers=12,
+        n_attn_heads=12,
+        context_length=1024,
+        vocab_size=50257,
+        drop_rate=0.1,
+        qkv_bias=True,
+        hf_repo_id="openai-community/gpt2",
     )
-
-    input_text = f"\n\n### Input:\n{entry['input']}" if entry["input"] else ""
-    return instruction_text + input_text
-
-
-class InstructionDataset(Dataset):
-    def __init__(
-        self,
-        data: list[dict],
-        tokenizer: tiktoken.Encoding,
-        formatter: Callable[[dict], str],
-    ):
-        self.data = data
-        self.encoded_texts = []
-        for entry in data:  # 1
-            instruction_plus_input = formatter(entry)
-            response_text = f"\n\n### Response:\n{entry['output']}"
-            full_text = instruction_plus_input + response_text
-            self.encoded_texts.append(tokenizer.encode(full_text))
-
-    def __getitem__(self, index):
-        return self.encoded_texts[index]
-
-    def __len__(self):
-        return len(self.data)
-
-
-def custom_collate_fn(
-    batch: Iterable[list],
-    device: torch.device,
-    pad_token_id=50256,
-    ignore_index=-100,  # default behavior of pytorch cross_entry function is to ignore targets labelled with -100
-    allowed_max_length: int | None = None,
-    instruction_length: int = -1,
-):
-    batch_max_length = max(len(item) + 1 for item in batch)
-    inputs_lst, targets_lst = [], []
-
-    for item in batch:
-        new_item = item.copy()
-        if len(new_item) < batch_max_length:
-            padded = new_item + [pad_token_id] * (batch_max_length - len(new_item))
-        else:
-            padded = new_item
-        inputs = torch.tensor(padded[:-1])  # 2
-        targets = torch.tensor(padded[1:])  # 3
-
-        # replace all but the first pad token with ignore_index token
-        # this means the model is not penalized for generating anything beyond the first eot token
-        # in practice this means the model will not be trained to generate beyond the pad token, resulting chat-like behavior
-        # where generation will be stopped when the first pad token is encountered
-        mask = targets == pad_token_id  # 4
-        indices = torch.nonzero(mask).squeeze()  # 4
-        if indices.numel() > 1:  # 4
-            targets[indices[1:]] = (
-                ignore_index  # mask everything beyond the first pad token
-            )
-
-        # it is also common to mask out instruction part of the input so that model is not trained to memorize it
-        # the same mechanism can be used for that
-        if instruction_length > 0:
-            targets[padded[:instruction_length]] = ignore_index
-
-        if allowed_max_length is not None:
-            inputs = inputs[:allowed_max_length]  # 5
-            targets = targets[:allowed_max_length]  # 5
-
-        inputs_lst.append(inputs)
-        targets_lst.append(targets)
-
-    inputs_tensor = torch.stack(inputs_lst).to(device)
-    targets_tensor = torch.stack(targets_lst).to(device)
-    return inputs_tensor, targets_tensor
+    gpt2_med_255m = GPTConfig(
+        emb_dim=1024,
+        n_layers=24,
+        n_attn_heads=16,
+        context_length=1024,
+        vocab_size=50257,
+        drop_rate=0.1,
+        qkv_bias=True,
+        hf_repo_id="openai-community/gpt2-medium",
+    )
+    gpt2_lg_755m = GPTConfig(
+        emb_dim=1280,
+        n_layers=36,
+        n_attn_heads=20,
+        context_length=1024,
+        vocab_size=50257,
+        drop_rate=0.1,
+        qkv_bias=True,
+        hf_repo_id="openai-community/gpt2-large",
+    )
+    gpt2_xlg_1558m = GPTConfig(
+        emb_dim=1600,
+        n_layers=48,
+        n_attn_heads=25,
+        context_length=1024,
+        vocab_size=50257,
+        drop_rate=0.1,
+        qkv_bias=True,
+        hf_repo_id="openai-community/gpt2-xl",
+    )

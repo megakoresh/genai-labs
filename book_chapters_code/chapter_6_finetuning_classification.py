@@ -4,13 +4,14 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import tiktoken
-import gpt_config
-from gpt_download_pretrainged_weights import download_model_weights
-from gpt2_model import (
+import models.gpt2
+from utils.gpt_download_pretrainged_weights import download_model_weights
+from models.gpt2 import (
     GPT2Model,
     load_weights_into_gpt_from_safetensors_params,
 )
-from gpt_utils import (
+import models.gpt2
+from utils.gpt_utils import (
     generate_text_simple,
     text_to_token_ids,
     token_ids_to_text,
@@ -152,7 +153,7 @@ def train_classifier_simple(
 
         for input_batch, target_batch in train_loader:
             optimizer.zero_grad()  # 4
-            loss = calc_loss_batch_classifier(input_batch, target_batch, model, device)
+            loss = calc_loss_batch_classifier(input_batch, target_batch, model)
             loss.backward()  # 5
             optimizer.step()  # 6
             examples_seen += input_batch.shape[0]  # 7
@@ -161,7 +162,7 @@ def train_classifier_simple(
             # 8
             if global_step % eval_freq == 0:
                 train_loss, val_loss = evaluate_model_classifier(
-                    model, train_loader, val_loader, device, eval_iter
+                    model, train_loader, val_loader, eval_iter
                 )
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
@@ -242,7 +243,7 @@ def classify_review(
 
 
 def adjust_model_for_classification(
-    model: GPT2Model, num_classes: int, config: gpt_config.GPTConfig
+    model: GPT2Model, num_classes: int, config: models.gpt2.GPTConfig
 ):
     # disable gradients on all layers so we only train the new finetuning layer
     for param in model.parameters():
@@ -259,7 +260,7 @@ def adjust_model_for_classification(
 
 if __name__ == "__main__":
     args = parse_args()
-    config = gpt_config.OpenAIModelConfigs.gpt2_small_124m
+    config = models.gpt2.OpenAIModelConfigs.gpt2_small_124m
     model_dir, weights = download_model_weights(
         "openai-community/gpt2", "data/models", "model.safetensors"
     )
@@ -392,15 +393,9 @@ if __name__ == "__main__":
         print(separator("calc_loss_loader test"))
 
         with torch.no_grad():  # 1
-            train_loss = calc_loss_loader_classifier(
-                train_loader, model, config.device, num_batches=5
-            )
-            val_loss = calc_loss_loader_classifier(
-                val_loader, model, config.device, num_batches=5
-            )
-            test_loss = calc_loss_loader_classifier(
-                test_loader, model, config.device, num_batches=5
-            )
+            train_loss = calc_loss_loader_classifier(train_loader, model, num_batches=5)
+            val_loss = calc_loss_loader_classifier(val_loader, model, num_batches=5)
+            test_loss = calc_loss_loader_classifier(test_loader, model, num_batches=5)
         print(f"Training loss: {train_loss:.3f}")
         print(f"Validation loss: {val_loss:.3f}")
         print(f"Test loss: {test_loss:.3f}")

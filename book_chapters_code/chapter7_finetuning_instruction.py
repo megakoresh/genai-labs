@@ -1,10 +1,9 @@
-from download_and_extract import download_file
+from utils.downloads import download_file
 from dataclasses import dataclass
 import argparse
 import json
-from gpt_utils import (
+from utils.gpt_utils import (
     calc_loss_loader_generator,
-    plot_losses,
     separator,
     generate,
     token_ids_to_text,
@@ -15,17 +14,19 @@ from torch.utils.data import Dataset, DataLoader
 import tiktoken
 from typing import Callable, Iterable
 import torch
-from gpt_config import OpenAIModelConfigs
+from models.gpt2 import OpenAIModelConfigs
 from functools import partial
-from gpt2_model import (
+from models.gpt2 import (
     GPT2Model,
     load_weights_into_gpt_from_safetensors_params,
     train_generator_simple,
 )
-from gpt_download_pretrainged_weights import download_model_weights
+from utils.gpt_download_pretrainged_weights import download_model_weights
 import time
 from tqdm import tqdm
 import re
+
+from utils.plot import plot_losses
 
 
 @dataclass
@@ -338,7 +339,6 @@ if __name__ == "__main__":
             train_loader,
             val_loader,
             optimizer,
-            device,
             num_epochs=num_epochs,
             eval_freq=5,
             eval_iter=5,

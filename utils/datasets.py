@@ -1,10 +1,12 @@
+from typing import Callable, Iterable
 import pandas as pd
 import argparse
 from dataclasses import dataclass
 import os
-import tiktoken
 import torch
 from torch.utils.data import Dataset
+
+from utils.gpt_utils import Encoding
 
 RANDOM_STATE: int | None = 123
 
@@ -139,3 +141,131 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def format_input_alpaca(entry):
+    instruction_text = (
+        f"Below is an instruction that describes a task. "
+        f"Write a response that appropriately completes the request."
+        f"\n\n### Instruction:\n{entry['instruction']}"
+    )
+
+    input_text = f"\n\n### Input:\n{entry['input']}" if entry["input"] else ""
+    return instruction_text + input_text
+
+
+def custom_collate_fn(
+    batch: Iterable[list],
+    device: torch.device,
+    pad_token_id=50256,
+    ignore_index=-100,  # default behavior of pytorch cross_entry function is to ignore targets labelled with -100
+    allowed_max_length: int | None = None,
+    instruction_length: int = -1,
+):
+    batch_max_length = max(len(item) + 1 for item in batch)
+    inputs_lst, targets_lst = [], []
+
+    for item in batch:
+        new_item = item.copy()
+        if len(new_item) < batch_max_length:
+            padded = new_item + [pad_token_id] * (batch_max_length - len(new_item))
+        else:
+            padded = new_item
+        inputs = torch.tensor(padded[:-1])  # 2
+        targets = torch.tensor(padded[1:])  # 3
+
+        # replace all but the first pad token with ignore_index token
+        # this means the model is not penalized for generating anything beyond the first eot token
+        # in practice this means the model will not be trained to generate beyond the pad token, resulting chat-like behavior
+        # where generation will be stopped when the first pad token is encountered
+        mask = targets == pad_token_id  # 4
+        indices = torch.nonzero(mask).squeeze()  # 4
+        if indices.numel() > 1:  # 4
+            targets[indices[1:]] = (
+                ignore_index  # mask everything beyond the first pad token
+            )
+
+        # it is also common to mask out instruction part of the input so that model is not trained to memorize it
+        # the same mechanism can be used for that
+        if instruction_length > 0:
+            targets[padded[:instruction_length]] = ignore_index
+
+        if allowed_max_length is not None:
+            inputs = inputs[:allowed_max_length]  # 5
+            targets = targets[:allowed_max_length]  # 5
+
+        inputs_lst.append(inputs)
+        targets_lst.append(targets)
+
+    inputs_tensor = torch.stack(inputs_lst)
+    targets_tensor = torch.stack(targets_lst)
+    return inputs_tensor, targets_tensor
+
+
+class InstructionDataset(Dataset):
+    def __init__(
+        self,
+        data: list[dict],
+        tokenizer: Encoding,
+        formatter: Callable[[dict], str],
+    ):
+        self.data = data
+        self.encoded_texts = []
+        for entry in data:  # 1
+            instruction_plus_input = formatter(entry)
+            response_text = f"\n\n### Response:\n{entry['output']}"
+            full_text = instruction_plus_input + response_text
+            self.encoded_texts.append(tokenizer.encode(full_text))
+
+    def __getitem__(self, index):
+        return self.encoded_texts[index]
+
+    def __len__(self):
+        return len(self.data)
+
+
+class SpamDataset(Dataset):
+    def __init__(
+        self,
+        csv_file: str,
+        tokenizer: Encoding,
+        max_length: int | None = None,
+        pad_token_id=50256,
+    ):
+        self.data = pd.read_csv(csv_file)
+        # 1
+        self.encoded_texts = [tokenizer.encode(text) for text in self.data["Text"]]
+
+        if max_length is None:
+            self.max_length = self._longest_encoded_length()
+        else:
+            self.max_length = max_length
+            # 2
+            self.encoded_texts = [
+                encoded_text[: self.max_length] for encoded_text in self.encoded_texts
+            ]
+
+        # 3
+        self.encoded_texts = [
+            encoded_text + [pad_token_id] * (self.max_length - len(encoded_text))
+            for encoded_text in self.encoded_texts
+        ]
+
+    def __getitem__(self, index: int):
+        encoded = self.encoded_texts[index]
+        label = self.data.iloc[index]["Label"]
+        return (
+            torch.tensor(encoded, dtype=torch.long),
+            torch.tensor(label, dtype=torch.long),
+        )
+
+    def __len__(self):
+        return len(self.data)
+
+    def _longest_encoded_length(self):
+        max_length = 0
+        for encoded_text in self.encoded_texts:
+            encoded_length = len(encoded_text)
+            if encoded_length > max_length:
+                max_length = encoded_length
+        return max_length
