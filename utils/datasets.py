@@ -199,7 +199,7 @@ def custom_collate_fn(
 
     inputs_tensor = torch.stack(inputs_lst)
     targets_tensor = torch.stack(targets_lst)
-    return inputs_tensor, targets_tensor
+    return inputs_tensor.to(device), targets_tensor.to(device)
 
 
 class InstructionDataset(Dataset):

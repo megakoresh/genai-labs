@@ -7,6 +7,7 @@ from typing import Any
 from torch.utils.data import DataLoader
 import tiktoken
 from utils.gpt_utils import (
+    Encoding,
     calc_loss_batch_generator,
     calc_loss_batch_classifier,
     evaluate_model_classifier,
@@ -528,7 +529,7 @@ def train_generator_simple(
     eval_freq: int,
     eval_iter: int,
     start_context: str,
-    tokenizer: tiktoken.Encoding,
+    tokenizer: Encoding,
 ):
     assert isinstance(start_context, str)
     device = next(model.parameters()).device
@@ -603,10 +604,14 @@ def train_generator_advanced(
     eval_freq: int,
     eval_iter: int,
     start_context: str,
-    tokenizer: tiktoken.Encoding,
+    tokenizer: Encoding,
     initial_lr=0.0001,
     min_lr=0.0001,
     gradient_clipping_max_norm=1.0,
+    sample_temperature=5,
+    sample_max_length=50,
+    sample_top_k=15,
+    sample_eos_id=50256,
 ):
     assert isinstance(start_context, str)
     train_losses, val_losses, track_tokens_seen, track_lrs = (
@@ -616,19 +621,29 @@ def train_generator_advanced(
         [],
     )  # training monitors
     device = next(model.parameters()).device
+    # some layers may have been replaced, align all layers again on same device
+    model.to(device)
     print(f"Training on {device}")
     tokens_seen, global_step = 0, -1
     total_steps = len(train_loader) * num_epochs
     warmup_steps = int(0.2 * total_steps)
     peak_lr = optimizer.param_groups[0]["lr"]
-    assert peak_lr > initial_lr, f"Peak lr from optimizer {peak_lr:f} was smaller than initial_lr {initial_lr:f}, which is not allowed"
+    assert (
+        peak_lr > initial_lr
+    ), f"Peak lr from optimizer {peak_lr:f} was smaller than initial_lr {initial_lr:f}, which is not allowed"
     lr_increment = (peak_lr - initial_lr) / warmup_steps
     print("Warmup steps:", warmup_steps)
-    print("LR increment:", lr_increment)
+    print(f"LR increment: {lr_increment:f}")
     # according to book, most of the production models are trained a few times on huge corpi of data, rather than many times on small corpus like here. This is done to prevent overfitting
     for epoch in range(num_epochs):
         model.train()
         for i, (input_batch, target_batch) in enumerate(train_loader):
+            assert (
+                input_batch.device == device
+            ), f"Input batch was on {input_batch.device}, while model is on {device}"
+            assert (
+                target_batch.device == device
+            ), f"Target batch was on {target_batch.device}, while model is on {device}"
             optimizer.zero_grad()  # reset gradients from prev. epoch
             global_step += 1
 
@@ -679,13 +694,13 @@ def train_generator_advanced(
 
         sample = generate(
             model,
-            text_to_token_ids(start_context, tokenizer).to(device),
-            50,
+            text_to_token_ids(start_context, tokenizer),
+            sample_max_length,
             config.context_length,
-            1.5,
-            15,
-            50256,
-        )  # 7
+            sample_temperature,
+            sample_top_k,
+            sample_eos_id,
+        )
         print("Sample:", token_ids_to_text(sample, tokenizer))
     return train_losses, val_losses, track_tokens_seen, track_lrs
 
