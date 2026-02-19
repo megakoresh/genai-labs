@@ -8,6 +8,7 @@ import random
 import re
 import time
 
+from matplotlib import pyplot as plt
 import tiktoken
 import torch
 from tqdm import tqdm
@@ -17,6 +18,7 @@ from models.gpt2 import (
     GPT2Model,
     replace_linear_with_lora,
     train_generator_advanced,
+    train_generator_simple,
 )
 from models.gpt2 import OpenAIModelConfigs
 from utils.gpt_utils import (
@@ -69,13 +71,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    rank = 32
+    rank = 64
     alpha = rank * 2
     dataset_path = download_file(args.url, args.dir)
     tokenizer = tiktoken.get_encoding("gpt2")
-    config = OpenAIModelConfigs.gpt2_med_255m
+    config = OpenAIModelConfigs.gpt2_lg_755m
     name = re.sub(r"[^a-zA-Z0-9]+", "_", config.hf_repo_id)
-    file_name = f"data/models/{name}-instruct-lora-advanced.pth"
+    file_name = f"data/models/{name}-instruct-lora-advanced_r{rank}_a{alpha}.pth"
     customized_collate_fn = partial(
         custom_collate_fn, device=config.device, allowed_max_length=1024
     )
@@ -173,7 +175,10 @@ if __name__ == "__main__":
 
         start_time = time.time()
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.1)
+        peak_lr = 0.001  # for LoRA since number of parameters is much smaller, we probably want more aggressive learning rates
+        min_lr = 0.0001
+        initial_lr = 0.0001
+        optimizer = torch.optim.AdamW(model.parameters(), lr=peak_lr, weight_decay=0.1)
         num_epochs = 2
         train_losses, val_losses, examples_seen, lr_seen = train_generator_advanced(
             model=model,
@@ -182,13 +187,21 @@ if __name__ == "__main__":
             val_loader=val_loader,
             optimizer=optimizer,
             num_epochs=num_epochs,
-            eval_freq=50,
+            eval_freq=10,
             eval_iter=5,
             tokenizer=tokenizer,
             start_context=format_input_alpaca(
                 val_data[int(random.random() * len(val_data))]
             ),
+            min_lr=min_lr,
+            initial_lr=initial_lr,
         )
+
+        # plt.figure(figsize=(5, 3))
+        # plt.plot(range(len(lrs)), lrs)
+        # plt.ylabel("Learning rate")
+        # plt.xlabel("Steps")
+        # plt.show()
 
         end_time = time.time()
         execution_time_minutes = (end_time - start_time) / 60
