@@ -3,3 +3,4 @@ data
 .env
 __pycache__
 .vscode
+unsloth_compiled_cache
