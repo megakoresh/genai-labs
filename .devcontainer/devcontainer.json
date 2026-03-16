@@ -1,0 +1,38 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
+{
+	"name": "Ubuntu",
+	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	// "image": "mcr.microsoft.com/devcontainers/base:noble"
+	"dockerFile": "Dockerfile",
+	// first enable nvidia runtime using instructions from here https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#docker
+	// then verify by running docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.6.2-base-ubuntu20.04 nvidia-smi on the host
+	"runArgs": ["--runtime", "nvidia", "--gpus", "all"],
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	// "features": {},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Use 'postCreateCommand' to run commands after vscode is attached to the running container.
+	"postCreateCommand": {
+		// this just install jupyter kernel. The other deps should be installed by the notebook
+		"venv": "python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt"
+	},
+
+	// Configure tool-specific properties.
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-toolsai.jupyter",
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-python.black-formatter"
+			]
+		}
+	}
+
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	// "remoteUser": "root"
+}
